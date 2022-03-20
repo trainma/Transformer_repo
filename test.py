@@ -91,3 +91,36 @@ sm = subsequent_mask(size)
 print("sm:", sm)
 plt.figure(figsize=(10, 10))
 plt.imshow(subsequent_mask(20)[0])
+
+# %%
+x = Variable(torch.randn(5, 5))
+print(x)
+
+mask = Variable(torch.zeros(5, 5))
+print(mask)
+
+y = x.masked_fill(mask == 0, -1e9)
+print(y)
+
+
+# %%
+def attention(query, key, value, mask=None, dropout=None):
+    d_k = query.size(-1)
+    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, -1e9)
+
+    p_attn = F.softmax(scores, dim=-1)
+
+    if dropout is not None:
+        p_attn = dropout(p_attn)
+
+    return torch.matmul(p_attn, value), p_attn
+
+
+query = key = value = pe_result
+attn, p_attn = attention(query, key, value)
+print(attn,attn.shape)
+print(p_attn,p_attn.shape)
+# %%
