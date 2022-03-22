@@ -332,5 +332,69 @@ class Encoder(nn.Module):
             x = layer(x, mask)
         return self.norm(x)
 
+    # 第一个实例化参数layer, 它是一个编码器层的实例化对象, 因此需要传入编码器层的参数
 
-    
+
+# 又因为编码器层中的子层是不共享的, 因此需要使用深度拷贝各个对象.
+size = 512
+head = 8
+d_model = 512
+d_ff = 64
+c = copy.deepcopy
+attn = MultiHeadedAttention(head, d_model)
+ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+dropout = 0.2
+layer = EncoderLayer(size, c(attn), c(ff), dropout)
+
+# 编码器中编码器层的个数N
+N = 8
+mask = Variable(torch.zeros(8, 4, 4))
+
+en = Encoder(layer, N)
+en_result = en(x, mask)
+print(en_result)
+print(en_result.shape)
+
+
+# %%
+class DecoderLayer(nn.Module):
+    def __init__(self, size, self_attn, src_attn, feed_forward, dropout):
+        super(DecoderLayer, self).__init__()
+        self.size = size
+        self.self_attn = self_attn
+        self.src_attn = src_attn
+        self.feed_forward = feed_forward
+        self.sublayer = clones(sublayerConnection(size, dropout), 3)
+
+    def forward(self, x, memory, source_mask, target_mask):
+        m = memory
+
+        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, target_mask))
+
+        x = self.sublayer[1](x, lambda x: self.src_attn(x, m, m, source_mask))
+
+        return self.sublayer[2](x, self.feed_forward)
+
+
+head = 8
+size = 512
+d_model = 512
+d_ff = 64
+dropout = .2
+self_attn = src_attn = MultiHeadedAttention(head, d_model, dropout)
+ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+
+x = pe_result
+
+# memory是来自编码器的输出
+memory = en_result
+
+# 实际中source_mask和target_mask并不相同, 这里为了方便计算使他们都为mask
+mask = torch.zeros(8, 4, 4)
+source_mask = target_mask = mask
+
+# %%
+dl = DecoderLayer(size, self_attn, src_attn, ff, dropout)
+dl_result = dl(x, memory, source_mask, target_mask)
+print(dl_result)
+print(dl_result.shape)
