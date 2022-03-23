@@ -392,9 +392,212 @@ memory = en_result
 # 实际中source_mask和target_mask并不相同, 这里为了方便计算使他们都为mask
 mask = torch.zeros(8, 4, 4)
 source_mask = target_mask = mask
-
-# %%
 dl = DecoderLayer(size, self_attn, src_attn, ff, dropout)
 dl_result = dl(x, memory, source_mask, target_mask)
 print(dl_result)
 print(dl_result.shape)
+
+
+# %%
+
+class Decoder(nn.Module):
+    def __init__(self, layer, N):
+        super().__init__()
+        self.layers = clones(layer, N)
+        self.norm = LayerNorm(layer.size)
+
+    def forward(self, x, memory, source_mask, target_mask):
+        for layer in self.layers:
+            x = layer(x, memory, source_mask, target_mask)
+        return self.norm(x)
+
+
+# 分别是解码器层layer和解码器层的个数N
+size = 512
+d_model = 512
+head = 8
+d_ff = 64
+dropout = 0.2
+c = copy.deepcopy
+attn = MultiHeadedAttention(head, d_model)
+ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+layer = DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout)
+N = 8
+# 输入参数与解码器层的输入参数相同
+x = pe_result
+memory = en_result
+mask = torch.zeros(8, 4, 4)
+source_mask = target_mask = mask
+de = Decoder(layer, N)
+de_result = de(x, memory, source_mask, target_mask)
+print(de_result)
+print(de_result.shape)
+
+# %%
+import torch.nn.functional as F
+
+
+class Generator(nn.Module):
+    def __init__(self, d_model, vocab_size):
+        super().__init__()
+        self.project = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        return F.log_softmax(self.project(x), dim=-1)
+
+
+d_model = 512
+
+# 词表大小是1000
+vocab_size = 1000
+x = de_result
+gen = Generator(d_model, vocab_size)
+gen_result = gen(x)
+print(gen_result)
+print(gen_result.shape)
+
+
+# %%
+
+class EncoderDecoder(nn.Module):
+    def __init__(self, encoder, decoder, source_embed, target_embed, generator):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = source_embed
+        self.tgt_embed = target_embed
+        self.generator = generator
+
+    def forward(self, source, target, source_mask, target_mask):
+        return self.decode(self.encode(source, source_mask), source_mask, target, target_mask)
+
+    def encode(self, source, source_mask):
+        return self.encoder(self.src_embed(source), source_mask)
+
+    def decode(self, memory, source_mask, target, target_mask):
+        return self.decoder(self.tgt_embed(target), memory, source_mask, target_mask)
+
+
+vocab_size = 1000
+d_model = 512
+encoder = en
+decoder = de
+source_embed = nn.Embedding(vocab_size, d_model)
+target_embed = nn.Embedding(vocab_size, d_model)
+generator = gen
+
+source = target = torch.LongTensor([[100, 2, 421, 508], [491, 998, 1, 221]])
+source_mask = target_mask = torch.zeros(8, 4, 4)
+
+ed = EncoderDecoder(encoder, decoder, source_embed, target_embed, generator)
+de_result = ed(source, target, source_mask, target_mask)
+print(de_result.shape)
+
+
+# %%
+
+def make_model(source_vocab, target_vocab, N=6, d_model=512, d_ff=2048, head=8, dropout=.1):
+    c = copy.deepcopy
+    attn = MultiHeadedAttention(head, d_model)
+    ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+    position = PositionalEncoding(d_model, dropout)
+
+    model = EncoderDecoder(
+        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N)
+        , Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),
+        nn.Sequential(Embeddings(d_model, source_vocab), c(position)),
+        nn.Sequential(Embeddings(d_model, target_vocab), c(position)),
+        Generator(d_model, target_vocab)
+    )
+
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    return model
+
+
+# %%
+source_vocab = 11
+target_vocab = 11
+N = 6
+res = make_model(source_vocab, target_vocab, N)
+print(res)
+
+# %%
+from pyitcast.transformer_utils import Batch
+
+
+def data_generator(V, batch, num_batch):
+    for i in range(num_batch):
+        data = torch.from_numpy(np.random.randint(1, V, size=(batch, 10)))
+        data[:, 0] = 1
+
+        source = Variable(data, requires_grad=False)
+        target = Variable(data, requires_grad=False)
+
+        yield Batch(source, target)
+
+
+V = 11
+batch = 20
+num_batch = 30
+res = data_generator(V, batch, num_batch)
+print(res)
+
+res.__next__()
+
+# %%
+from pyitcast.transformer_utils import get_std_opt
+from pyitcast.transformer_utils import LabelSmoothing
+from pyitcast.transformer_utils import SimpleLossCompute
+
+model = make_model(V, V, N=2)
+model_optimizer = get_std_opt(model)
+criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+loss = SimpleLossCompute(model.generator, criterion, model_optimizer)
+
+# %%
+from pyitcast.transformer_utils import run_epoch
+
+
+def run(model, loss, epochs=10):
+    for epoch in range(epochs):
+        model.train()
+        run_epoch(data_generator(V, 8, 20), model, loss)
+        model.eval()
+        run_epoch(data_generator(V, 8, 5), model, loss)
+
+# 导入贪婪解码工具包greedy_decode, 该工具将对最终结进行贪婪解码
+# 贪婪解码的方式是每次预测都选择概率最大的结果作为输出,
+# 它不一定能获得全局最优性, 但却拥有最高的执行效率.
+from pyitcast.transformer_utils import greedy_decode
+
+
+def run(model, loss, epochs=10):
+    for epoch in range(epochs):
+        model.train()
+
+        run_epoch(data_generator(V, 8, 20), model, loss)
+
+        model.eval()
+
+        run_epoch(data_generator(V, 8, 5), model, loss)
+
+    # 模型进入测试模式
+    model.eval()
+
+    # 假定的输入张量
+    source = Variable(torch.LongTensor([[1,3,2,5,4,6,7,8,9,10]]))
+
+    # 定义源数据掩码张量, 因为元素都是1, 在我们这里1代表不遮掩
+    # 因此相当于对源数据没有任何遮掩.
+    source_mask = Variable(torch.ones(1, 1, 10))
+
+    # 最后将model, src, src_mask, 解码的最大长度限制max_len, 默认为10
+    # 以及起始标志数字, 默认为1, 我们这里使用的也是1
+    result = greedy_decode(model, source, source_mask, max_len=10, start_symbol=1)
+    print(result)
+
+
+if __name__ == '__main__':
+    run(model, loss)
